@@ -42,10 +42,14 @@ class DQN(nn.Module):
         return self.model(states)
 
     @torch.no_grad()
-    def sample_actions(self, states: Tensor, *, epsilon: float) -> Tensor:
+    def greedy_actions(self, states: Tensor) -> Tensor:
+        return self.forward(states).argmax(dim=1)
+
+    @torch.no_grad()
+    def eps_greedy_actions(self, states: Tensor, *, epsilon: float) -> Tensor:
         batch_size = states.shape[0]
 
-        greedy = self.forward(states).argmax(dim=1)
+        greedy = self.greedy_actions(states)
         random = torch.randint(self.n_actions, size=(batch_size,), device=states.device)
         explore = torch.rand(batch_size, device=states.device) < epsilon
 

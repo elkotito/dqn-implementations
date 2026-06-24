@@ -3,8 +3,7 @@ from dataclasses import asdict
 from typing import Literal
 
 import wandb
-
-from dqn.loggers.logger import TrainingMetrics
+from dqn.loggers.logger import EvaluationMetrics, TrainingMetrics
 
 
 class WandbLogger:
@@ -20,8 +19,11 @@ class WandbLogger:
         self._run = wandb.init(project=project, entity=entity, name=run_name, config=dict(config), mode=mode)
         self._closed = False
 
-    def log(self, *, metrics: TrainingMetrics, step: int) -> None:
-        self._run.log(asdict(metrics), step=step)
+    def log_train(self, *, metrics: TrainingMetrics, step: int) -> None:
+        self._run.log({f"train/{name}": value for name, value in asdict(metrics).items()}, step=step)
+
+    def log_eval(self, *, metrics: EvaluationMetrics, step: int) -> None:
+        self._run.log({f"eval/{name}": value for name, value in asdict(metrics).items()}, step=step)
 
     def close(self) -> None:
         if not self._closed:

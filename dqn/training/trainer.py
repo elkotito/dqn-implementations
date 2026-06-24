@@ -1,10 +1,9 @@
 import os
-import sys
+import random
 from collections import deque
 from pathlib import Path
-from random import random
 from statistics import fmean
-from typing import Self, cast
+from typing import Literal, Self, cast
 
 import gymnasium as gym
 import torch
@@ -14,7 +13,8 @@ from pydantic_settings import BaseSettings, CliSettingsSource, PydanticBaseSetti
 
 from dqn.buffers.replay_buffer import ReplayBuffer, Transition, Transitions
 from dqn.envs.atari import make_atari_env
-from dqn.loggers.logger import Logger, TrainingMetrics
+from dqn.loggers.logger import EvaluationMetrics, TrainingMetrics
+from dqn.loggers.wandb import WandbLogger
 from dqn.network.dqn import DQN
 
 
@@ -63,14 +63,20 @@ class TrainerConfig(BaseSettings):
     gamma: float = Field(default=0.99, ge=0.0, le=1.0)
 
     # Infrastructure & meta
-    device: str = Field(default="cpu", pattern=r"^(?:cpu|cuda|mps)$")
+    device: Literal["cpu", "cuda", "mps"] = "cpu"
     seed: int = Field(default=2137, ge=0)
 
     # Output
-    policy_dir: Path | None = Field(default=None, description="Directory for best_policy.pt and last_policy.pt")
-    policy_save_interval_steps: int = Field(default=250_000, gt=0)
+    policy_dir: Path | None = Field(default=None, description="Directory for policy.pt and best_policy.pt")
+
+    # Evaluation
+    eval_interval_steps: int = Field(default=250_000, gt=0)
+    eval_episodes: int = Field(default=10, gt=0)
 
     # Logging
+    wandb_project: str = Field(default="pong", min_length=1)
+    wandb_mode: Literal["online", "offline", "disabled"] = "online"
+
     log_interval_steps: int = Field(default=10_000, gt=0)
     episode_window_size: int = Field(default=100, gt=0)
     loss_window_size: int = Field(default=100, gt=0)
@@ -126,11 +132,11 @@ class Trainer:
     for simplicity, since it is a standalone implementation rather than a training framework.
     """
 
-    def __init__(self, config: TrainerConfig, logger: Logger) -> None:
+    def __init__(self, config: TrainerConfig) -> None:
         self.config = config
-        self.logger = logger
         self.device = torch.device(config.device)
         self.env = make_atari_env(config.env_id)
+        self.eval_env = make_atari_env(config.env_id)
         action_space = cast(gym.spaces.Discrete, self.env.action_space)
 
         random.seed(config.seed)
@@ -143,12 +149,22 @@ class Trainer:
         self.optimizer = torch.optim.Adam(self.policy_network.parameters(), lr=config.learning_rate)
         self.loss_fn = nn.SmoothL1Loss()
 
-        self.current_step = 0
-        self.best_mean_episode_return = float("-inf")
-        self.latest_mean_episode_return: float | None = None
-        self.best_policy_saved = False
+        self.best_eval_mean_episode_return = float("-inf")
+        self.latest_train_mean_episode_return: float | None = None
+        self.logger = WandbLogger(
+            project=config.wandb_project,
+            config=config.model_dump(mode="json"),
+            mode=config.wandb_mode,
+        )
 
-    def _save_policy(self, name: str, *, step: int, mean_episode_return: float | None) -> Path | None:
+    def _save_policy(
+        self,
+        name: str,
+        *,
+        step: int,
+        train_mean_episode_return: float | None,
+        eval_mean_episode_return: float | None,
+    ) -> Path | None:
         if self.config.policy_dir is None:
             return None
 
@@ -161,7 +177,8 @@ class Trainer:
             },
             "env_id": self.config.env_id,
             "step": step,
-            "mean_episode_return": mean_episode_return,
+            "train_mean_episode_return": train_mean_episode_return,
+            "eval_mean_episode_return": eval_mean_episode_return,
         }
 
         try:
@@ -171,6 +188,34 @@ class Trainer:
             temporary_path.unlink(missing_ok=True)
 
         return policy_path
+
+    def _evaluate(self) -> EvaluationMetrics:
+        episode_returns: list[float] = []
+        episode_lengths: list[int] = []
+
+        for _ in range(self.config.eval_episodes):
+            state, _ = self.eval_env.reset()
+            episode_return = 0.0
+            episode_length = 0
+            done = False
+
+            while not done:
+                batch_state = state.unsqueeze(0).to(self.device).float().div_(255.0)
+                action = self.policy_network.greedy_actions(batch_state).squeeze(0).cpu()
+                state, reward, terminated, truncated, _ = self.eval_env.step(action)
+                episode_return += float(reward)
+                episode_length += 1
+                done = terminated or truncated
+
+            episode_returns.append(episode_return)
+            episode_lengths.append(episode_length)
+
+        return EvaluationMetrics(
+            mean_episode_return=fmean(episode_returns),
+            min_episode_return=min(episode_returns),
+            max_episode_return=max(episode_returns),
+            mean_episode_length=fmean(episode_lengths),
+        )
 
     def _epsilon_at_step(self, step: int) -> float:
         """Linear decay of epsilon over the course of training after replay warmup steps."""
@@ -215,13 +260,12 @@ class Trainer:
 
         state, _ = self.env.reset(seed=self.config.seed)
         for step in range(1, self.config.total_steps + 1):
-            self.current_step = step
             epsilon = self._epsilon_at_step(step)
             episode_length += 1
 
             # Add batch dimension since `sample_actions` expects a batch of states, but we use a single env
             batch_state = state.unsqueeze(0).to(self.device).float().div_(255.0)
-            batch_actions = self.policy_network.sample_actions(batch_state, epsilon=epsilon)
+            batch_actions = self.policy_network.eps_greedy_actions(batch_state, epsilon=epsilon)
             action = batch_actions.squeeze(0).cpu()
 
             next_state, reward, terminated, truncated, _ = self.env.step(action)
@@ -242,11 +286,7 @@ class Trainer:
                 episode_length = 0
 
                 mean_episode_return = fmean(episode_returns)
-                self.latest_mean_episode_return = mean_episode_return
-                if mean_episode_return > self.best_mean_episode_return:
-                    self.best_mean_episode_return = mean_episode_return
-                    self._save_policy("best_policy.pt", step=step, mean_episode_return=mean_episode_return)
-                    self.best_policy_saved = True
+                self.latest_train_mean_episode_return = mean_episode_return
             else:
                 state = next_state
 
@@ -259,29 +299,38 @@ class Trainer:
                 self.target_network.sync(self.policy_network)
 
             if step % self.config.log_interval_steps == 0:
-                self.logger.log(
+                training_metrics = TrainingMetrics(
+                    mean_rolling_loss=fmean(losses) if losses else None,
+                    mean_episode_length=fmean(episode_lengths) if episode_lengths else None,
+                    mean_episode_return=fmean(episode_returns) if episode_returns else None,
+                    epsilon=epsilon,
+                    replay_buffer_size=len(self.replay_buffer),
+                )
+                self.logger.log_train(metrics=training_metrics, step=step)
+
+            if step % self.config.eval_interval_steps == 0 or step == self.config.total_steps:
+                evaluation_metrics = self._evaluate()
+                self.logger.log_eval(metrics=evaluation_metrics, step=step)
+                self._save_policy(
+                    "policy.pt",
                     step=step,
-                    metrics=TrainingMetrics(
-                        mean_rolling_loss=fmean(losses) if losses else None,
-                        mean_episode_length=fmean(episode_lengths) if episode_lengths else None,
-                        mean_episode_return=fmean(episode_returns) if episode_returns else None,
-                        epsilon=epsilon,
-                        replay_buffer_size=len(self.replay_buffer),
-                    ),
+                    train_mean_episode_return=self.latest_train_mean_episode_return,
+                    eval_mean_episode_return=evaluation_metrics.mean_episode_return,
                 )
 
-            if step % self.config.policy_save_interval_steps == 0:
-                self._save_policy("last_policy.pt", step=step, mean_episode_return=fmean(episode_returns) if episode_returns else None)
+                if evaluation_metrics.mean_episode_return > self.best_eval_mean_episode_return:
+                    self.best_eval_mean_episode_return = evaluation_metrics.mean_episode_return
+                    self._save_policy(
+                        "best_policy.pt",
+                        step=step,
+                        train_mean_episode_return=self.latest_train_mean_episode_return,
+                        eval_mean_episode_return=evaluation_metrics.mean_episode_return,
+                    )
 
     def train(self) -> None:
         try:
             self._train()
         finally:
-            try:
-                self._save_policy("last_policy.pt", step=self.current_step, mean_episode_return=self.latest_mean_episode_return)
-                if not self.best_policy_saved:
-                    self._save_policy("best_policy.pt", step=self.current_step, mean_episode_return=self.latest_mean_episode_return)
-            except Exception as error:
-                print(f"Failed to save final policy: {error}", file=sys.stderr)
             self.env.close()
+            self.eval_env.close()
             self.logger.close()

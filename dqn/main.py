@@ -1,11 +1,9 @@
-from dqn.loggers.wandb import WandbLogger
 from dqn.training.trainer import Trainer, TrainerConfig
 
 
 def main() -> None:
     config = TrainerConfig()
-    logger = WandbLogger(project="pong", config=config.model_dump(mode="json"))
-    trainer = Trainer(config, logger)
+    trainer = Trainer(config)
     trainer.train()
 
 

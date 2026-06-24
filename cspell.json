@@ -10,6 +10,7 @@
     "newaxis",
     "undones",
     "customise",
-    "dotenv"
+    "dotenv",
+    "wandb"
   ]
 }
