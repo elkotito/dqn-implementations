@@ -11,7 +11,7 @@ epsilon_start: 1.0
 epsilon_end: 0.01
 epsilon_decay_steps: 250000
 
-tau_soft_update: 0.01
+target_sync_interval_steps: 10000
 reward_clip: 1.0
 gamma: 0.99
 
