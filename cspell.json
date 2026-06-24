@@ -3,6 +3,9 @@
     "idxs",
     "\"batch q_values\"",
     "\"batch n_frames x y\"",
-    "jaxtyping"
+    "jaxtyping",
+    "multinomial",
+    "lerp",
+    "frameskip"
   ]
 }
