@@ -67,7 +67,7 @@ class TrainerConfig(BaseSettings):
     seed: int = Field(default=2137, ge=0)
 
     # Output
-    policy_dir: Path | None = Field(default=None, description="Directory for policy.pt and best_policy.pt")
+    policy_dir: Path | None = Field(default=None, description="Directory to store policy.pt and best_policy.pt")
 
     # Evaluation
     eval_interval_steps: int = Field(default=250_000, gt=0)

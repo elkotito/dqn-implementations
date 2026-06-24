@@ -118,3 +118,9 @@ scripts/train.sh POD_ID
 The script starts the pod, waits for SSH, uploads the current code, runs
 training, and stops the pod. Policies remain on the network volume under
 `/workspace/dqn/policies`.
+
+# TODO:
+
+1. Parallel envs
+2. Preallocate tensors for transitions
+3. Store a single frame and then expand since it is almost exactly the same.
