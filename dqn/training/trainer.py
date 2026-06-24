@@ -83,6 +83,7 @@ class TrainerConfig(BaseSettings):
         config_path = cli_settings().get("config")
         yaml_settings = YamlConfigSettingsSource(settings_cls, yaml_file=config_path)
 
+        # Order determines priority
         return cli_settings, init_settings, env_settings, dotenv_settings, file_secret_settings, yaml_settings
 
     @model_validator(mode="after")
