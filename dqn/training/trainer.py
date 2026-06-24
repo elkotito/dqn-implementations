@@ -48,8 +48,8 @@ class TrainerConfig(BaseModel):
 
     # Logging
     log_interval_steps: int = Field(default=1_000, gt=0)
-    recent_episodes: int = Field(default=100, gt=0)
-    loss_window: int = Field(default=100, gt=0)
+    episode_window_size: int = Field(default=100, gt=0)
+    loss_window_size: int = Field(default=100, gt=0)
 
     @model_validator(mode="after")
     def validate_config(self) -> Self:
@@ -97,7 +97,7 @@ class Trainer:
         self.optimizer = torch.optim.AdamW(self.policy_network.parameters(), lr=config.learning_rate)
         self.loss_fn = nn.MSELoss()
 
-    def epsilon_at_step(self, step: int) -> float:
+    def _epsilon_at_step(self, step: int) -> float:
         """Linear decay of epsilon over the course of training after replay warmup steps."""
 
         if step < self.config.replay_warmup_steps:
@@ -108,7 +108,7 @@ class Trainer:
         diff = (self.config.epsilon_start - self.config.epsilon_end) / self.config.epsilon_decay_steps
         return self.config.epsilon_start - step * diff
 
-    def train_step(self, batch_transitions: Transitions) -> float:
+    def _train_step(self, batch_transitions: Transitions) -> float:
         states, actions, rewards, next_states, dones = batch_transitions
 
         # Transferring uint8 to GPU is 4x faster than floats
@@ -134,57 +134,60 @@ class Trainer:
 
         return loss.item()
 
-    def train(self) -> None:
-        returns = deque[float](maxlen=self.config.recent_episodes)
-        episode_lengths = deque[int](maxlen=self.config.recent_episodes)
-        losses = deque[float](maxlen=self.config.loss_window)
+    def _train(self) -> None:
+        returns = deque[float](maxlen=self.config.episode_window_size)
+        episode_lengths = deque[int](maxlen=self.config.episode_window_size)
+        losses = deque[float](maxlen=self.config.loss_window_size)
         episode_return = 0
         episode_length = 0
 
+        state, _ = self.env.reset(seed=self.config.seed)
+        for step in range(1, self.config.total_steps + 1):
+            epsilon = self._epsilon_at_step(step)
+            episode_length += 1
+
+            # Add batch dimension since `sample_actions` expects a batch of states, but we use a single env
+            batch_state = state.unsqueeze(0).to(self.device).float().div_(255.0)
+            batch_actions = self.policy_network.sample_actions(batch_state, epsilon=epsilon)
+            action = batch_actions.squeeze(0).cpu()
+
+            next_state, reward, terminated, truncated, _ = self.env.step(action)
+            episode_return += float(reward)
+            done = terminated or truncated
+
+            transition = Transition(state=state, action=int(action.item()), reward=float(reward), next_state=next_state, done=done)
+            self.replay_buffer.add(transition)
+
+            if done:
+                returns.append(episode_return)
+                episode_lengths.append(episode_length)
+
+                state, _ = self.env.reset()
+                episode_return = 0
+                episode_length = 0
+            else:
+                state = next_state
+
+            if len(self.replay_buffer) >= self.config.replay_warmup_steps:
+                batch_transitions = self.replay_buffer.sample(self.config.batch_size)
+                loss = self._train_step(batch_transitions)
+                losses.append(loss)
+
+            if step % self.config.log_interval_steps == 0:
+                self.logger.log(
+                    step=step,
+                    metrics=TrainingMetrics(
+                        mean_rolling_loss=fmean(losses) if losses else None,
+                        mean_episode_length=fmean(episode_lengths) if episode_lengths else None,
+                        mean_recent_return=fmean(returns) if returns else None,
+                        epsilon=epsilon,
+                        replay_buffer_size=len(self.replay_buffer),
+                    ),
+                )
+
+    def train(self) -> None:
         try:
-            state, _ = self.env.reset(seed=self.config.seed)
-            for step in range(1, self.config.total_steps + 1):
-                epsilon = self.epsilon_at_step(step)
-                episode_length += 1
-
-                # Add batch dimension since `sample_actions` expects a batch of states, but we use a single env
-                batch_state = state.unsqueeze(0).to(self.device).float().div_(255.0)
-                batch_actions = self.policy_network.sample_actions(batch_state, epsilon=epsilon)
-                action = batch_actions.squeeze(0).cpu()
-
-                next_state, reward, terminated, truncated, _ = self.env.step(action)
-                episode_return += float(reward)
-                done = terminated or truncated
-
-                transition = Transition(state=state, action=int(action.item()), reward=float(reward), next_state=next_state, done=done)
-                self.replay_buffer.add(transition)
-
-                if done:
-                    returns.append(episode_return)
-                    episode_lengths.append(episode_length)
-
-                    state, _ = self.env.reset()
-                    episode_return = 0
-                    episode_length = 0
-                else:
-                    state = next_state
-
-                if len(self.replay_buffer) >= self.config.replay_warmup_steps:
-                    batch_transitions = self.replay_buffer.sample(self.config.batch_size)
-                    loss = self.train_step(batch_transitions)
-                    losses.append(loss)
-
-                if step % self.config.log_interval_steps == 0:
-                    self.logger.log(
-                        step=step,
-                        metrics=TrainingMetrics(
-                            rolling_loss=fmean(losses) if losses else None,
-                            mean_episode_length=fmean(episode_lengths) if episode_lengths else None,
-                            mean_recent_return=fmean(returns) if returns else None,
-                            epsilon=epsilon,
-                            replay_buffer_size=len(self.replay_buffer),
-                        ),
-                    )
+            self._train()
         finally:
             self.env.close()
             self.logger.close()
