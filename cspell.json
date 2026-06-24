@@ -3,9 +3,10 @@
     "idxs",
     "\"batch q_values\"",
     "\"batch n_frames x y\"",
-    "jaxtyping",
     "multinomial",
     "lerp",
-    "frameskip"
+    "frameskip",
+    "dones",
+    "newaxis"
   ]
 }

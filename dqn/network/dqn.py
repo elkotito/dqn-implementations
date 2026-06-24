@@ -3,14 +3,7 @@ from typing import Self
 
 import torch
 import torch.nn as nn
-from jaxtyping import Float
 from torch import Tensor
-
-from dqn.main import Probability
-
-BatchState = Float[Tensor, "batch channels x y"]
-BatchActionValues = Float[Tensor, "batch q"]
-BatchActions = Float[Tensor, "batch"]
 
 
 class DQN(nn.Module):
@@ -42,16 +35,14 @@ class DQN(nn.Module):
         target.eval()
         return target
 
-    def forward(self, states: BatchState) -> BatchActionValues:
+    def forward(self, states: Tensor) -> Tensor:
         return self.model(states)
 
-    def sample_actions(
-        self, state: BatchState, *, eps_greedy: Probability
-    ) -> BatchActions:
+    def sample_actions(self, state: Tensor, *, epsilon: float) -> Tensor:
         batch_size = state.shape[0]
 
         greedy = self.forward(state).argmax(dim=1)
         random = torch.randint(self.n_actions, size=(batch_size,), device=state.device)
-        explore = torch.rand(batch_size, device=state.device) < eps_greedy
+        explore = torch.rand(batch_size, device=state.device) < epsilon
 
         return torch.where(explore, random, greedy)

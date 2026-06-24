@@ -1,0 +1,120 @@
+from typing import Self, cast
+
+import gymnasium as gym
+import torch
+import torch.nn as nn
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from torch import Tensor
+
+from dqn.buffers.replay_buffer import ReplayBuffer, Transition
+from dqn.envs.atari import make_atari_env
+from dqn.network.dqn import DQN
+
+
+class TrainerConfig(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", validate_default=True, strict=True)
+
+    # Training
+    total_steps: int = Field(default=1_000_000, ge=0)
+    seed: int = Field(default=2137, ge=0)
+
+    # Environment
+    env_id: str = Field(default="ALE/Pong-v5", pattern=r"^ALE/")
+
+    # Replay buffer
+    replay_warmup_steps: int = Field(default=5_000, ge=0)
+    replay_capacity: int = Field(default=10_000, ge=0)
+
+    # Optimizer
+    batch_size: int = Field(default=32, ge=0)
+    learning_rate: float = Field(default=1e-4, ge=0.0)
+
+    # Exploration
+    epsilon_start: float = Field(default=1.0, ge=0.0, le=1.0)
+    epsilon_end: float = Field(default=0.01, ge=0.0, le=1.0)
+    epsilon_decay_steps: int = Field(default=250_000, gt=0)
+
+    # Target network
+    tau_soft_update: float = Field(default=0.01, ge=0.0)
+
+    # Rewards
+    reward_clip: float = Field(default=1.0, ge=0.0)
+    gamma: float = Field(default=0.99, ge=0.0, le=1.0)
+
+    # Infrastructure
+    device: str = Field(default="cpu", pattern=r"^cpu|cuda$")
+
+    @model_validator(mode="after")
+    def validate_config(self) -> Self:
+        if self.epsilon_end > self.epsilon_start:
+            raise ValueError("epsilon_end cannot be greater than epsilon_start")
+
+        if self.batch_size > self.replay_capacity:
+            raise ValueError("batch_size cannot be greater than replay_capacity")
+
+        if self.replay_warmup_steps > self.replay_capacity:
+            raise ValueError("replay_warmup_steps cannot be greater than replay_capacity")
+
+        if self.replay_warmup_steps >= self.total_steps:
+            raise ValueError("replay_warmup_steps must be smaller than total_steps")
+
+        if self.replay_warmup_steps + self.epsilon_decay_steps > self.total_steps:
+            raise ValueError("warmup and epsilon decay must finish within total_steps")
+
+        return self
+
+
+class Trainer:
+    """
+    Trains a DQN agent using the given configuration.
+
+    Typically, components such as the policy network and replay buffer are created
+    separately and passed to the trainer. This project keeps them inside the trainer
+    for simplicity, since it is a standalone implementation rather than a training framework.
+    """
+
+    def __init__(self, config: TrainerConfig) -> None:
+        self.config = config
+        self.env = make_atari_env(config.env_id)
+        action_space = cast(gym.spaces.Discrete, self.env.action_space)
+
+        self.policy_network = DQN(int(action_space.n)).to(config.device)
+        self.target_network = self.policy_network.build_target_network()
+        self.replay_buffer = ReplayBuffer(config.replay_capacity)
+        self.optimizer = torch.optim.AdamW(self.policy_network.parameters())
+        self.loss_fn = nn.MSELoss()
+
+    def epsilon_at_step(self, step: int) -> float:
+        """Linear decay of epsilon over the course of training after replay warmup steps."""
+
+        if step < self.config.replay_warmup_steps:
+            return self.config.epsilon_start
+
+        step -= self.config.replay_warmup_steps
+        step = min(step, self.config.epsilon_decay_steps)
+        diff = (self.config.epsilon_start - self.config.epsilon_end) / self.config.epsilon_decay_steps
+        return self.config.epsilon_start - step * diff
+
+    def train_step(self, transitions: Tensor):
+        pass
+
+    def train(self):
+        state, _ = self.env.reset(seed=self.config.seed)
+        for step in range(1, self.config.total_steps + 1):
+            epsilon = self.epsilon_at_step(step)
+
+            # Imo we need to move state to GPU
+            actions = self.policy_network.sample_actions(state, epsilon=epsilon)
+            # Then we need to take actions to CPU
+            next_state, reward, terminated, truncated, _ = self.env.step(actions)
+            done = terminated or truncated
+
+            self.replay_buffer.add(Transition(state, float(reward), next_state, done))
+            if done:
+                state, _ = self.env.reset()
+
+            state = next_state
+
+            if len(self.replay_buffer) >= self.config.replay_warmup_steps:
+                batch_transitions = self.replay_buffer.sample(self.config.batch_size)
+                self.train_step(batch_transitions)
