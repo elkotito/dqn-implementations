@@ -9,6 +9,7 @@ dependencies = [
     "opencv-python>=3.0",
     "pydantic>=2.13.4",
     "torch>=2.12.1",
+    "wandb>=0.27.1",
 ]
 
 [tool.ruff]

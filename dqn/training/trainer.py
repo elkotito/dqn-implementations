@@ -1,4 +1,5 @@
 from collections import deque
+from statistics import fmean
 from typing import Self, cast
 
 import gymnasium as gym
@@ -8,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from dqn.buffers.replay_buffer import ReplayBuffer, Transition, Transitions
 from dqn.envs.atari import make_atari_env
+from dqn.loggers.logger import Logger, TrainingMetrics
 from dqn.network.dqn import DQN
 
 
@@ -45,7 +47,9 @@ class TrainerConfig(BaseModel):
     device: str = Field(default="cpu", pattern=r"^cpu|cuda$")
 
     # Logging
-    recent_returns: int = Field(default=100, gt=0)
+    log_interval_steps: int = Field(default=1_000, gt=0)
+    recent_episodes: int = Field(default=100, gt=0)
+    loss_window: int = Field(default=100, gt=0)
 
     @model_validator(mode="after")
     def validate_config(self) -> Self:
@@ -79,8 +83,9 @@ class Trainer:
     for simplicity, since it is a standalone implementation rather than a training framework.
     """
 
-    def __init__(self, config: TrainerConfig) -> None:
+    def __init__(self, config: TrainerConfig, logger: Logger) -> None:
         self.config = config
+        self.logger = logger
         self.device = torch.device(config.device)
         self.env = make_atari_env(config.env_id)
         action_space = cast(gym.spaces.Discrete, self.env.action_space)
@@ -116,7 +121,7 @@ class Trainer:
         predicted_q_values = self.policy_network(states).gather(actions[:, None], dim=1).squeeze(1)
         with torch.no_grad():
             max_q_values, _ = self.target_network(next_states).max(dim=1)
-            target_q_values = rewards + self.config.gamma * ~(dones).float() * max_q_values
+            target_q_values = rewards + self.config.gamma * (~dones).float() * max_q_values
 
         loss = self.loss_fn(predicted_q_values, target_q_values)
 
@@ -124,43 +129,62 @@ class Trainer:
         loss.backward()
         self.optimizer.step()
 
+        # Soft update (Polyak)
         self.target_network.update_from(self.policy_network, tau=self.config.tau_soft_update)
+
         return loss.item()
 
     def train(self) -> None:
-        returns = deque[float](maxlen=self.config.recent_returns)
+        returns = deque[float](maxlen=self.config.recent_episodes)
+        episode_lengths = deque[int](maxlen=self.config.recent_episodes)
+        losses = deque[float](maxlen=self.config.loss_window)
         episode_return = 0
+        episode_length = 0
 
-        state, _ = self.env.reset(seed=self.config.seed)
-        for step in range(1, self.config.total_steps + 1):
-            epsilon = self.epsilon_at_step(step)
+        try:
+            state, _ = self.env.reset(seed=self.config.seed)
+            for step in range(1, self.config.total_steps + 1):
+                epsilon = self.epsilon_at_step(step)
+                episode_length += 1
 
-            # Add batch dimension since `sample_actions` expects a batch of states, but we use a single env
-            batch_state = state.unsqueeze(0).to(self.device).float().div_(255.0)
-            batch_actions = self.policy_network.sample_actions(batch_state, epsilon=epsilon)
-            action = batch_actions.squeeze(0).cpu()
+                # Add batch dimension since `sample_actions` expects a batch of states, but we use a single env
+                batch_state = state.unsqueeze(0).to(self.device).float().div_(255.0)
+                batch_actions = self.policy_network.sample_actions(batch_state, epsilon=epsilon)
+                action = batch_actions.squeeze(0).cpu()
 
-            next_state, reward, terminated, truncated, _ = self.env.step(action)
-            episode_return += float(reward)
-            done = terminated or truncated
+                next_state, reward, terminated, truncated, _ = self.env.step(action)
+                episode_return += float(reward)
+                done = terminated or truncated
 
-            self.replay_buffer.add(
-                Transition(
-                    state=state,
-                    action=int(action.item()),
-                    reward=float(reward),
-                    next_state=next_state,
-                    done=done,
-                )
-            )
+                transition = Transition(state=state, action=int(action.item()), reward=float(reward), next_state=next_state, done=done)
+                self.replay_buffer.add(transition)
 
-            if done:
-                state, _ = self.env.reset()
-                returns.append(episode_return)
-                episode_return = 0
-            else:
-                state = next_state
+                if done:
+                    returns.append(episode_return)
+                    episode_lengths.append(episode_length)
 
-            if len(self.replay_buffer) >= self.config.replay_warmup_steps:
-                batch_transitions = self.replay_buffer.sample(self.config.batch_size)
-                loss = self.train_step(batch_transitions)
+                    state, _ = self.env.reset()
+                    episode_return = 0
+                    episode_length = 0
+                else:
+                    state = next_state
+
+                if len(self.replay_buffer) >= self.config.replay_warmup_steps:
+                    batch_transitions = self.replay_buffer.sample(self.config.batch_size)
+                    loss = self.train_step(batch_transitions)
+                    losses.append(loss)
+
+                if step % self.config.log_interval_steps == 0:
+                    self.logger.log(
+                        step=step,
+                        metrics=TrainingMetrics(
+                            rolling_loss=fmean(losses) if losses else None,
+                            mean_episode_length=fmean(episode_lengths) if episode_lengths else None,
+                            mean_recent_return=fmean(returns) if returns else None,
+                            epsilon=epsilon,
+                            replay_buffer_size=len(self.replay_buffer),
+                        ),
+                    )
+        finally:
+            self.env.close()
+            self.logger.close()
