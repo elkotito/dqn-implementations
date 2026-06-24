@@ -25,9 +25,12 @@ class DQN(nn.Module):
 
     @torch.no_grad()
     def update_from(self, source: Self, *, tau: float) -> None:
-        """Used to update Target Network"""
         for target_param, source_param in zip(self.parameters(), source.parameters()):
             target_param.lerp_(source_param, weight=tau)
+
+    @torch.no_grad()
+    def sync(self, source: Self) -> None:
+        self.load_state_dict(source.state_dict())
 
     def build_target_network(self) -> Self:
         target = deepcopy(self)

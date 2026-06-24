@@ -9,6 +9,7 @@
     "dones",
     "newaxis",
     "undones",
-    "customise"
+    "customise",
+    "dotenv"
   ]
 }

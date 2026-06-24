@@ -16,6 +16,8 @@ reward_clip: 1.0
 gamma: 0.99
 
 device: cpu
+policy_dir: null
+policy_save_interval_steps: 50000
 
 log_interval_steps: 1000
 episode_window_size: 100
