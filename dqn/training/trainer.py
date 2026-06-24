@@ -5,7 +5,8 @@ from typing import Self, cast
 import gymnasium as gym
 import torch
 import torch.nn as nn
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import Field, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from dqn.buffers.replay_buffer import ReplayBuffer, Transition, Transitions
 from dqn.envs.atari import make_atari_env
@@ -13,8 +14,16 @@ from dqn.loggers.logger import Logger, TrainingMetrics
 from dqn.network.dqn import DQN
 
 
-class TrainerConfig(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid", validate_default=True, strict=True)
+class TrainerConfig(BaseSettings):
+    model_config = SettingsConfigDict(
+        frozen=True,
+        extra="forbid",
+        validate_default=True,
+        strict=True,
+        cli_parse_args=True,
+        cli_kebab_case=True,
+        env_prefix="DQN_",
+    )
 
     # Training
     total_steps: int = Field(default=1_000_000, ge=0)
@@ -44,7 +53,7 @@ class TrainerConfig(BaseModel):
     gamma: float = Field(default=0.99, ge=0.0, le=1.0)
 
     # Infrastructure
-    device: str = Field(default="cpu", pattern=r"^cpu|cuda$")
+    device: str = Field(default="cpu", pattern=r"^cpu|cuda|mps$")
 
     # Logging
     log_interval_steps: int = Field(default=1_000, gt=0)
