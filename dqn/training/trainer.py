@@ -118,7 +118,7 @@ class Trainer:
         rewards = rewards.to(self.device)
         dones = dones.to(self.device)
 
-        predicted_q_values = self.policy_network(states).gather(actions[:, None], dim=1).squeeze(1)
+        predicted_q_values = self.policy_network(states).gather(index=actions[:, None], dim=1).squeeze(1)
         with torch.no_grad():
             max_q_values, _ = self.target_network(next_states).max(dim=1)
             target_q_values = rewards + self.config.gamma * (~dones).float() * max_q_values
