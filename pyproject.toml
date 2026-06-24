@@ -8,7 +8,7 @@ dependencies = [
     "gymnasium[atari,torch]>=1.3.0",
     "opencv-python>=3.0",
     "pydantic>=2.13.4",
-    "pydantic-settings>=2.13.1",
+    "pydantic-settings[yaml]>=2.13.1",
     "torch>=2.12.1",
     "wandb>=0.27.1",
 ]

@@ -1,4 +1,5 @@
 from collections import deque
+from pathlib import Path
 from statistics import fmean
 from typing import Self, cast
 
@@ -6,7 +7,13 @@ import gymnasium as gym
 import torch
 import torch.nn as nn
 from pydantic import Field, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import (
+    BaseSettings,
+    CliSettingsSource,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+    YamlConfigSettingsSource,
+)
 
 from dqn.buffers.replay_buffer import ReplayBuffer, Transition, Transitions
 from dqn.envs.atari import make_atari_env
@@ -21,9 +28,12 @@ class TrainerConfig(BaseSettings):
         validate_default=True,
         strict=True,
         cli_parse_args=True,
+        cli_hide_none_type=True,
         cli_kebab_case=True,
         env_prefix="DQN_",
     )
+
+    config: Path | None = Field(default=None, exclude=True, description="Path to a YAML configuration file")
 
     # Training
     total_steps: int = Field(default=1_000_000, ge=0)
@@ -60,8 +70,26 @@ class TrainerConfig(BaseSettings):
     episode_window_size: int = Field(default=100, gt=0)
     loss_window_size: int = Field(default=100, gt=0)
 
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        cli_settings = CliSettingsSource(settings_cls, cli_parse_args=True)
+        config_path = cli_settings().get("config")
+        yaml_settings = YamlConfigSettingsSource(settings_cls, yaml_file=config_path)
+
+        return cli_settings, init_settings, env_settings, dotenv_settings, file_secret_settings, yaml_settings
+
     @model_validator(mode="after")
     def validate_config(self) -> Self:
+        if self.config is not None and not self.config.is_file():
+            raise ValueError(f"config file does not exist: {self.config}")
+
         if self.epsilon_end > self.epsilon_start:
             raise ValueError("epsilon_end cannot be greater than epsilon_start")
 
@@ -144,7 +172,7 @@ class Trainer:
         return loss.item()
 
     def _train(self) -> None:
-        returns = deque[float](maxlen=self.config.episode_window_size)
+        episode_returns = deque[float](maxlen=self.config.episode_window_size)
         episode_lengths = deque[int](maxlen=self.config.episode_window_size)
         losses = deque[float](maxlen=self.config.loss_window_size)
         episode_return = 0
@@ -168,10 +196,9 @@ class Trainer:
             self.replay_buffer.add(transition)
 
             if done:
-                returns.append(episode_return)
-                episode_lengths.append(episode_length)
-
                 state, _ = self.env.reset()
+                episode_returns.append(episode_return)
+                episode_lengths.append(episode_length)
                 episode_return = 0
                 episode_length = 0
             else:
@@ -188,7 +215,7 @@ class Trainer:
                     metrics=TrainingMetrics(
                         mean_rolling_loss=fmean(losses) if losses else None,
                         mean_episode_length=fmean(episode_lengths) if episode_lengths else None,
-                        mean_recent_return=fmean(returns) if returns else None,
+                        mean_episode_return=fmean(episode_returns) if episode_returns else None,
                         epsilon=epsilon,
                         replay_buffer_size=len(self.replay_buffer),
                     ),

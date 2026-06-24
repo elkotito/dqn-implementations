@@ -6,7 +6,7 @@ from typing import Protocol
 class TrainingMetrics:
     mean_rolling_loss: float | None
     mean_episode_length: float | None
-    mean_recent_return: float | None
+    mean_episode_return: float | None
     epsilon: float
     replay_buffer_size: int
 

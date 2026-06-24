@@ -1,0 +1,22 @@
+total_steps: 1000000
+seed: 2137
+env_id: ALE/Pong-v5
+
+replay_warmup_steps: 5000
+replay_capacity: 10000
+batch_size: 32
+learning_rate: 0.00025
+
+epsilon_start: 1.0
+epsilon_end: 0.01
+epsilon_decay_steps: 250000
+
+tau_soft_update: 0.01
+reward_clip: 1.0
+gamma: 0.99
+
+device: cpu
+
+log_interval_steps: 1000
+episode_window_size: 100
+loss_window_size: 100
