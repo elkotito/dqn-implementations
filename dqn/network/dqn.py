@@ -7,7 +7,7 @@ from torch import Tensor
 
 
 class DQN(nn.Module):
-    def __init__(self, n_actions: int) -> None:
+    def __init__(self, n_actions: int, device: str) -> None:
         super().__init__()
         self.n_actions = n_actions
         self.model = nn.Sequential(
@@ -21,7 +21,7 @@ class DQN(nn.Module):
             nn.Linear(64 * 7 * 7, 512),
             nn.ReLU(),
             nn.Linear(512, n_actions),
-        )
+        ).to(device)
 
     @torch.no_grad()
     def update_from(self, source: Self, *, tau: float) -> None:
@@ -38,11 +38,12 @@ class DQN(nn.Module):
     def forward(self, states: Tensor) -> Tensor:
         return self.model(states)
 
-    def sample_actions(self, state: Tensor, *, epsilon: float) -> Tensor:
-        batch_size = state.shape[0]
+    @torch.no_grad()
+    def sample_actions(self, states: Tensor, *, epsilon: float) -> Tensor:
+        batch_size = states.shape[0]
 
-        greedy = self.forward(state).argmax(dim=1)
-        random = torch.randint(self.n_actions, size=(batch_size,), device=state.device)
-        explore = torch.rand(batch_size, device=state.device) < epsilon
+        greedy = self.forward(states).argmax(dim=1)
+        random = torch.randint(self.n_actions, size=(batch_size,), device=states.device)
+        explore = torch.rand(batch_size, device=states.device) < epsilon
 
         return torch.where(explore, random, greedy)

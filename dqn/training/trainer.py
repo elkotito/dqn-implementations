@@ -1,12 +1,12 @@
+from collections import deque
 from typing import Self, cast
 
 import gymnasium as gym
 import torch
 import torch.nn as nn
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from torch import Tensor
 
-from dqn.buffers.replay_buffer import ReplayBuffer, Transition
+from dqn.buffers.replay_buffer import ReplayBuffer, Transition, Transitions
 from dqn.envs.atari import make_atari_env
 from dqn.network.dqn import DQN
 
@@ -23,10 +23,10 @@ class TrainerConfig(BaseModel):
 
     # Replay buffer
     replay_warmup_steps: int = Field(default=5_000, ge=0)
-    replay_capacity: int = Field(default=10_000, ge=0)
+    replay_capacity: int = Field(default=10_000, gt=0)
 
     # Optimizer
-    batch_size: int = Field(default=32, ge=0)
+    batch_size: int = Field(default=32, gt=0)
     learning_rate: float = Field(default=1e-4, ge=0.0)
 
     # Exploration
@@ -44,6 +44,9 @@ class TrainerConfig(BaseModel):
     # Infrastructure
     device: str = Field(default="cpu", pattern=r"^cpu|cuda$")
 
+    # Logging
+    recent_returns: int = Field(default=100, gt=0)
+
     @model_validator(mode="after")
     def validate_config(self) -> Self:
         if self.epsilon_end > self.epsilon_start:
@@ -51,6 +54,9 @@ class TrainerConfig(BaseModel):
 
         if self.batch_size > self.replay_capacity:
             raise ValueError("batch_size cannot be greater than replay_capacity")
+
+        if self.batch_size > self.replay_warmup_steps:
+            raise ValueError("batch_size cannot be greater than replay_warmup_steps")
 
         if self.replay_warmup_steps > self.replay_capacity:
             raise ValueError("replay_warmup_steps cannot be greater than replay_capacity")
@@ -75,13 +81,15 @@ class Trainer:
 
     def __init__(self, config: TrainerConfig) -> None:
         self.config = config
+        self.device = torch.device(config.device)
         self.env = make_atari_env(config.env_id)
         action_space = cast(gym.spaces.Discrete, self.env.action_space)
 
-        self.policy_network = DQN(int(action_space.n)).to(config.device)
+        self.policy_network = DQN(int(action_space.n), config.device)
         self.target_network = self.policy_network.build_target_network()
+
         self.replay_buffer = ReplayBuffer(config.replay_capacity)
-        self.optimizer = torch.optim.AdamW(self.policy_network.parameters())
+        self.optimizer = torch.optim.AdamW(self.policy_network.parameters(), lr=config.learning_rate)
         self.loss_fn = nn.MSELoss()
 
     def epsilon_at_step(self, step: int) -> float:
@@ -95,26 +103,64 @@ class Trainer:
         diff = (self.config.epsilon_start - self.config.epsilon_end) / self.config.epsilon_decay_steps
         return self.config.epsilon_start - step * diff
 
-    def train_step(self, transitions: Tensor):
-        pass
+    def train_step(self, batch_transitions: Transitions) -> float:
+        states, actions, rewards, next_states, dones = batch_transitions
 
-    def train(self):
+        # Transferring uint8 to GPU is 4x faster than floats
+        states = states.to(self.device).float().div_(255.0)
+        next_states = next_states.to(self.device).float().div_(255.0)
+        actions = actions.to(self.device)
+        rewards = rewards.to(self.device)
+        dones = dones.to(self.device)
+
+        predicted_q_values = self.policy_network(states).gather(actions[:, None], dim=1).squeeze(1)
+        with torch.no_grad():
+            max_q_values, _ = self.target_network(next_states).max(dim=1)
+            target_q_values = rewards + self.config.gamma * ~(dones).float() * max_q_values
+
+        loss = self.loss_fn(predicted_q_values, target_q_values)
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+        self.target_network.update_from(self.policy_network, tau=self.config.tau_soft_update)
+        return loss.item()
+
+    def train(self) -> None:
+        returns = deque[float](maxlen=self.config.recent_returns)
+        episode_return = 0
+
         state, _ = self.env.reset(seed=self.config.seed)
         for step in range(1, self.config.total_steps + 1):
             epsilon = self.epsilon_at_step(step)
 
-            # Imo we need to move state to GPU
-            actions = self.policy_network.sample_actions(state, epsilon=epsilon)
-            # Then we need to take actions to CPU
-            next_state, reward, terminated, truncated, _ = self.env.step(actions)
+            # Add batch dimension since `sample_actions` expects a batch of states, but we use a single env
+            batch_state = state.unsqueeze(0).to(self.device).float().div_(255.0)
+            batch_actions = self.policy_network.sample_actions(batch_state, epsilon=epsilon)
+            action = batch_actions.squeeze(0).cpu()
+
+            next_state, reward, terminated, truncated, _ = self.env.step(action)
+            episode_return += float(reward)
             done = terminated or truncated
 
-            self.replay_buffer.add(Transition(state, float(reward), next_state, done))
+            self.replay_buffer.add(
+                Transition(
+                    state=state,
+                    action=int(action.item()),
+                    reward=float(reward),
+                    next_state=next_state,
+                    done=done,
+                )
+            )
+
             if done:
                 state, _ = self.env.reset()
-
-            state = next_state
+                returns.append(episode_return)
+                episode_return = 0
+            else:
+                state = next_state
 
             if len(self.replay_buffer) >= self.config.replay_warmup_steps:
                 batch_transitions = self.replay_buffer.sample(self.config.batch_size)
-                self.train_step(batch_transitions)
+                loss = self.train_step(batch_transitions)

@@ -25,7 +25,7 @@ def make_atari_env(env_id: str) -> AtariEnv:
         screen_size=84,
         grayscale_obs=True,
         grayscale_newaxis=False,
-        scale_obs=False,  # We store raw uint8 in replay buffer
+        scale_obs=False,  # We store raw uint8 in replay buffer hence we don't scale obs
     )
     env = FrameStackObservation(env, stack_size=4)
     env = NumpyToTorch(env, device="cpu")
