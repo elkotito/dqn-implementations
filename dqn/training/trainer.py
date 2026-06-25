@@ -1,6 +1,5 @@
 import os
 import random
-from collections import deque
 from pathlib import Path
 from statistics import fmean
 from typing import Literal, Self, cast
@@ -14,9 +13,9 @@ from pydantic_settings import BaseSettings, CliSettingsSource, PydanticBaseSetti
 
 from dqn.buffers.replay_buffer import ReplayBuffer, Transition, Transitions
 from dqn.envs.atari import make_atari_env
-from dqn.loggers.logger import EvaluationMetrics, TrainingMetrics
 from dqn.loggers.wandb import WandbLogger
 from dqn.network.dqn import DQN
+from dqn.training.metrics import EpisodeMetrics, EvaluationMetrics, MetricsTracker, OptimizationMetrics
 
 
 class TrainerConfig(BaseSettings):
@@ -81,7 +80,7 @@ class TrainerConfig(BaseSettings):
     # Logging
     log_interval_steps: int = Field(default=10_000, gt=0)
     episode_window_size: int = Field(default=100, gt=0)
-    loss_window_size: int = Field(default=100, gt=0)
+    optimization_window_size: int = Field(default=100, gt=0)
 
     @classmethod
     def settings_customise_sources(
@@ -153,13 +152,11 @@ class Trainer:
         self.optimizer = torch.optim.Adam(self.policy_network.parameters(), lr=config.learning_rate)
         self.loss_fn = nn.SmoothL1Loss()
 
-        self.best_eval_mean_episode_return = float("-inf")
-        self.latest_train_mean_episode_return: float | None = None
-        self.logger = WandbLogger(
-            project=config.wandb_project,
-            config=config.model_dump(mode="json"),
-            mode=config.wandb_mode,
+        self.metrics = MetricsTracker(
+            episode_window_size=config.episode_window_size,
+            optimization_window_size=config.optimization_window_size,
         )
+        self.logger = WandbLogger(project=config.wandb_project, config=config.model_dump(mode="json"), mode=config.wandb_mode)
 
     def _save_policy(
         self,
@@ -236,7 +233,7 @@ class Trainer:
         diff = (self.config.epsilon_start - self.config.epsilon_end) / self.config.epsilon_decay_steps
         return self.config.epsilon_start - step * diff
 
-    def _train_step(self, batch_transitions: Transitions) -> float:
+    def _train_step(self, batch_transitions: Transitions) -> OptimizationMetrics:
         states, actions, rewards, next_states, dones = batch_transitions
 
         # Transferring uint8 to GPU is 4x faster than floats
@@ -252,17 +249,26 @@ class Trainer:
             target_q_values = rewards + self.config.gamma * (~dones).float() * max_q_values
 
         loss = self.loss_fn(predicted_q_values, target_q_values)
+        abs_td_error = (target_q_values - predicted_q_values).abs()
 
         self.optimizer.zero_grad()
         loss.backward()
+        gradient_norm = torch.nn.utils.get_total_norm(
+            parameter.grad for parameter in self.policy_network.parameters() if parameter.grad is not None
+        )
         self.optimizer.step()
 
-        return loss.item()
+        return OptimizationMetrics(
+            loss=loss.detach().cpu().item(),
+            gradient_norm=gradient_norm.detach().cpu().item(),
+            predicted_q=predicted_q_values.detach().mean().cpu().item(),
+            predicted_q_max=predicted_q_values.detach().max().cpu().item(),
+            target_q=target_q_values.detach().mean().cpu().item(),
+            target_q_max=target_q_values.detach().max().cpu().item(),
+            abs_td_error=abs_td_error.detach().mean().cpu().item(),
+        )
 
     def _train(self) -> None:
-        episode_returns = deque[float](maxlen=self.config.episode_window_size)
-        episode_lengths = deque[int](maxlen=self.config.episode_window_size)
-        losses = deque[float](maxlen=self.config.loss_window_size)
         episode_return = 0
         episode_length = 0
 
@@ -288,50 +294,42 @@ class Trainer:
 
             if done:
                 state, _ = self.env.reset()
-                episode_returns.append(episode_return)
-                episode_lengths.append(episode_length)
+                episode_metrics = EpisodeMetrics(episode_return=episode_return, episode_length=episode_length)
+                self.metrics.record_episode(episode_metrics)
                 episode_return = 0
                 episode_length = 0
-
-                mean_episode_return = fmean(episode_returns)
-                self.latest_train_mean_episode_return = mean_episode_return
             else:
                 state = next_state
 
             if len(self.replay_buffer) >= self.config.replay_warmup_steps and step % self.config.train_frequency_steps == 0:
                 batch_transitions = self.replay_buffer.sample(self.config.batch_size)
-                loss = self._train_step(batch_transitions)
-                losses.append(loss)
+                optimization_metrics = self._train_step(batch_transitions)
+                self.metrics.record_optimization(optimization_metrics)
 
             if step % self.config.target_sync_interval_steps == 0:
                 self.target_network.sync(self.policy_network)
 
             if step % self.config.log_interval_steps == 0:
-                training_metrics = TrainingMetrics(
-                    mean_rolling_loss=fmean(losses) if losses else None,
-                    mean_episode_length=fmean(episode_lengths) if episode_lengths else None,
-                    mean_episode_return=fmean(episode_returns) if episode_returns else None,
-                    epsilon=epsilon,
-                    replay_buffer_size=len(self.replay_buffer),
-                )
-                self.logger.log_train(metrics=training_metrics, step=step)
+                metrics = self.metrics.training_snapshot(epsilon=epsilon, replay_buffer_size=len(self.replay_buffer))
+                self.logger.log_train(step=step, metrics=metrics)
 
             if step % self.config.eval_interval_steps == 0 or step == self.config.total_steps:
                 evaluation_metrics = self._evaluate()
-                self.logger.log_eval(metrics=evaluation_metrics, step=step)
+                is_best_evaluation = self.metrics.record_evaluation(evaluation_metrics)
+                self.logger.log_eval(step=step, metrics=evaluation_metrics)
+
                 self._save_policy(
                     "policy.pt",
                     step=step,
-                    train_mean_episode_return=self.latest_train_mean_episode_return,
+                    train_mean_episode_return=self.metrics.mean_episode_return,
                     eval_mean_episode_return=evaluation_metrics.mean_episode_return,
                 )
 
-                if evaluation_metrics.mean_episode_return > self.best_eval_mean_episode_return:
-                    self.best_eval_mean_episode_return = evaluation_metrics.mean_episode_return
+                if is_best_evaluation:
                     self._save_policy(
                         "best_policy.pt",
                         step=step,
-                        train_mean_episode_return=self.latest_train_mean_episode_return,
+                        train_mean_episode_return=self.metrics.mean_episode_return,
                         eval_mean_episode_return=evaluation_metrics.mean_episode_return,
                     )
 

@@ -3,7 +3,8 @@ from dataclasses import asdict
 from typing import Literal
 
 import wandb
-from dqn.loggers.logger import EvaluationMetrics, TrainingMetrics
+
+from dqn.training.metrics import EvaluationMetrics, TrainingMetrics
 
 
 class WandbLogger:

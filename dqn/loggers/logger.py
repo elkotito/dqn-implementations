@@ -1,22 +1,6 @@
-from dataclasses import dataclass
 from typing import Protocol
 
-
-@dataclass(frozen=True, slots=True)
-class TrainingMetrics:
-    mean_rolling_loss: float | None
-    mean_episode_length: float | None
-    mean_episode_return: float | None
-    epsilon: float
-    replay_buffer_size: int
-
-
-@dataclass(frozen=True, slots=True)
-class EvaluationMetrics:
-    mean_episode_return: float
-    min_episode_return: float
-    max_episode_return: float
-    mean_episode_length: float
+from dqn.training.metrics import EvaluationMetrics, TrainingMetrics
 
 
 class Logger(Protocol):
