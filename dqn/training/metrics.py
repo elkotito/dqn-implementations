@@ -11,7 +11,7 @@ class EpisodeMetrics:
 
 
 @dataclass(frozen=True, slots=True)
-class OptimizationMetrics:
+class GradientUpdateMetrics:
     loss: float
     gradient_norm: float
     predicted_q: float
@@ -23,6 +23,8 @@ class OptimizationMetrics:
 
 @dataclass(frozen=True, slots=True)
 class TrainingMetrics:
+    epsilon: float
+    replay_buffer_size: int
     mean_rolling_loss: float | None
     mean_rolling_gradient_norm: float | None
     mean_rolling_predicted_q: float | None
@@ -32,8 +34,6 @@ class TrainingMetrics:
     mean_rolling_abs_td_error: float | None
     mean_episode_length: float | None
     mean_episode_return: float | None
-    epsilon: float
-    replay_buffer_size: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,23 +45,24 @@ class EvaluationMetrics:
 
 
 class MetricsTracker:
-    def __init__(self, *, episode_window_size: int, optimization_window_size: int) -> None:
+    def __init__(self, *, episode_window_size: int, gradient_update_window_size: int) -> None:
         self._episodes = deque[EpisodeMetrics](maxlen=episode_window_size)
-        self._optimizations = deque[OptimizationMetrics](maxlen=optimization_window_size)
+        self._gradient_updates = deque[GradientUpdateMetrics](maxlen=gradient_update_window_size)
         self._latest_evaluation: EvaluationMetrics | None = None
         self._best_evaluation: EvaluationMetrics | None = None
 
     def record_episode(self, metrics: EpisodeMetrics) -> None:
         self._episodes.append(metrics)
 
-    def record_optimization(self, metrics: OptimizationMetrics) -> None:
-        self._optimizations.append(metrics)
+    def record_gradient_update(self, metrics: GradientUpdateMetrics) -> None:
+        self._gradient_updates.append(metrics)
 
     def record_evaluation(self, metrics: EvaluationMetrics) -> bool:
         self._latest_evaluation = metrics
         if self._best_evaluation is None or metrics.mean_episode_return > self._best_evaluation.mean_episode_return:
             self._best_evaluation = metrics
             return True
+
         return False
 
     @property
@@ -78,13 +79,13 @@ class MetricsTracker:
 
     def training_snapshot(self, *, epsilon: float, replay_buffer_size: int) -> TrainingMetrics:
         return TrainingMetrics(
-            mean_rolling_loss=self._mean(self._optimizations, lambda metrics: metrics.loss),
-            mean_rolling_gradient_norm=self._mean(self._optimizations, lambda metrics: metrics.gradient_norm),
-            mean_rolling_predicted_q=self._mean(self._optimizations, lambda metrics: metrics.predicted_q),
-            mean_rolling_predicted_q_max=self._mean(self._optimizations, lambda metrics: metrics.predicted_q_max),
-            mean_rolling_target_q=self._mean(self._optimizations, lambda metrics: metrics.target_q),
-            mean_rolling_target_q_max=self._mean(self._optimizations, lambda metrics: metrics.target_q_max),
-            mean_rolling_abs_td_error=self._mean(self._optimizations, lambda metrics: metrics.abs_td_error),
+            mean_rolling_loss=self._mean(self._gradient_updates, lambda metrics: metrics.loss),
+            mean_rolling_gradient_norm=self._mean(self._gradient_updates, lambda metrics: metrics.gradient_norm),
+            mean_rolling_predicted_q=self._mean(self._gradient_updates, lambda metrics: metrics.predicted_q),
+            mean_rolling_predicted_q_max=self._mean(self._gradient_updates, lambda metrics: metrics.predicted_q_max),
+            mean_rolling_target_q=self._mean(self._gradient_updates, lambda metrics: metrics.target_q),
+            mean_rolling_target_q_max=self._mean(self._gradient_updates, lambda metrics: metrics.target_q_max),
+            mean_rolling_abs_td_error=self._mean(self._gradient_updates, lambda metrics: metrics.abs_td_error),
             mean_episode_length=self._mean(self._episodes, lambda metrics: metrics.episode_length),
             mean_episode_return=self.mean_episode_return,
             epsilon=epsilon,

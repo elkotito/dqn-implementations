@@ -12,14 +12,14 @@ class DQN(nn.Module):
         self.n_actions = n_actions
         self.model = nn.Sequential(
             nn.Conv2d(4, 32, kernel_size=8, stride=4),
-            nn.ReLU(),
+            nn.LeakyReLU(negative_slope=0.01),
             nn.Conv2d(32, 64, kernel_size=4, stride=2),
-            nn.ReLU(),
+            nn.LeakyReLU(negative_slope=0.01),
             nn.Conv2d(64, 64, kernel_size=3, stride=1),
-            nn.ReLU(),
+            nn.LeakyReLU(negative_slope=0.01),
             nn.Flatten(),
             nn.Linear(64 * 7 * 7, 512),
-            nn.ReLU(),
+            nn.LeakyReLU(negative_slope=0.01),
             nn.Linear(512, n_actions),
         ).to(device)
 

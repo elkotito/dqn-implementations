@@ -15,7 +15,7 @@ from dqn.buffers.replay_buffer import ReplayBuffer, Transition, Transitions
 from dqn.envs.atari import make_atari_env
 from dqn.loggers.wandb import WandbLogger
 from dqn.network.dqn import DQN
-from dqn.training.metrics import EpisodeMetrics, EvaluationMetrics, MetricsTracker, OptimizationMetrics
+from dqn.training.metrics import EpisodeMetrics, EvaluationMetrics, GradientUpdateMetrics, MetricsTracker
 
 
 class TrainerConfig(BaseSettings):
@@ -32,11 +32,11 @@ class TrainerConfig(BaseSettings):
     config: Path | None = Field(default=None, exclude=True, description="Path to a YAML configuration file")
 
     # Training
-    total_steps: int = Field(default=10_000_000, ge=0)
-    train_frequency_steps: int = Field(
+    total_steps: int = Field(default=10_000_000, gt=0)
+    gradient_update_interval_steps: int = Field(
         default=4,
         gt=0,
-        description="Run one gradient update every N environment steps. It improves training speed. It is not related to 4 frames forming a single state.",
+        description="Run one gradient update every N environment steps as it improves training speed. It is not related to 4 frames forming a single state.",
     )
 
     # Environment
@@ -48,26 +48,27 @@ class TrainerConfig(BaseSettings):
 
     # Optimizer
     batch_size: int = Field(default=32, gt=0)
-    learning_rate: float = Field(default=1e-4, ge=0.0)
+    learning_rate: float = Field(default=6.25e-5, gt=0.0, allow_inf_nan=False)
+    adam_epsilon: float = Field(default=1e-4, gt=0.0, allow_inf_nan=False)
 
     # Exploration
-    epsilon_start: float = Field(default=1.0, ge=0.0, le=1.0)
-    epsilon_end: float = Field(default=0.01, ge=0.0, le=1.0)
+    epsilon_start: float = Field(default=1.0, ge=0.0, le=1.0, allow_inf_nan=False)
+    epsilon_end: float = Field(default=0.01, ge=0.0, le=1.0, allow_inf_nan=False)
     epsilon_decay_steps: int = Field(default=1_000_000, gt=0)
 
     # Target network
-    target_sync_interval_steps: int = Field(default=10_000, gt=0)
+    target_network_sync_interval_steps: int = Field(default=10_000, gt=0)
 
     # Rewards
-    reward_clip: float = Field(default=1.0, gt=0.0)
-    gamma: float = Field(default=0.99, ge=0.0, le=1.0)
+    reward_clip: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
+    gamma: float = Field(default=0.99, ge=0.0, le=1.0, allow_inf_nan=False)
 
     # Infrastructure & meta
     device: Literal["cpu", "cuda", "mps"] = "cpu"
-    seed: int = Field(default=2137, ge=0)
+    seed: int = Field(default=2137, ge=0, le=2**32 - 1)
 
     # Output
-    policy_dir: Path | None = Field(default=None, description="Directory to store policy.pt and best_policy.pt")
+    policy_dir: Path = Field(default=Path("./policies"), strict=False)
 
     # Evaluation
     eval_interval_steps: int = Field(default=250_000, gt=0)
@@ -78,9 +79,9 @@ class TrainerConfig(BaseSettings):
     wandb_mode: Literal["online", "offline", "disabled"] = "online"
 
     # Logging
-    log_interval_steps: int = Field(default=10_000, gt=0)
+    train_log_interval_steps: int = Field(default=10_000, gt=0)
     episode_window_size: int = Field(default=100, gt=0)
-    optimization_window_size: int = Field(default=100, gt=0)
+    gradient_update_window_size: int = Field(default=100, gt=0)
 
     @classmethod
     def settings_customise_sources(
@@ -102,6 +103,20 @@ class TrainerConfig(BaseSettings):
     def validate_config(self) -> Self:
         if self.config is not None and not self.config.is_file():
             raise ValueError(f"config file does not exist: {self.config}")
+
+        try:
+            gym.spec(self.env_id)
+        except gym.error.Error as error:
+            raise ValueError(f"environment does not exist: {self.env_id}") from error
+
+        if self.device == "cuda" and not torch.cuda.is_available():
+            raise ValueError("CUDA device is not available")
+
+        if self.device == "mps" and not torch.backends.mps.is_available():
+            raise ValueError("MPS device is not available")
+
+        if self.policy_dir.exists() and not self.policy_dir.is_dir():
+            raise ValueError(f"policy_dir is not a directory: {self.policy_dir}")
 
         if self.epsilon_end > self.epsilon_start:
             raise ValueError("epsilon_end cannot be greater than epsilon_start")
@@ -149,12 +164,18 @@ class Trainer:
         self.target_network = self.policy_network.build_target_network()
 
         self.replay_buffer = ReplayBuffer(config.replay_capacity)
-        self.optimizer = torch.optim.Adam(self.policy_network.parameters(), lr=config.learning_rate)
+        # A larger epsilon limits Adam updates when the second-moment estimate is very small,
+        # reducing abrupt Q-value changes that can destabilize DQN training.
+        self.optimizer = torch.optim.Adam(
+            self.policy_network.parameters(),
+            lr=config.learning_rate,
+            eps=config.adam_epsilon,
+        )
         self.loss_fn = nn.SmoothL1Loss()
 
         self.metrics = MetricsTracker(
             episode_window_size=config.episode_window_size,
-            optimization_window_size=config.optimization_window_size,
+            gradient_update_window_size=config.gradient_update_window_size,
         )
         self.logger = WandbLogger(project=config.wandb_project, config=config.model_dump(mode="json"), mode=config.wandb_mode)
 
@@ -165,10 +186,7 @@ class Trainer:
         step: int,
         train_mean_episode_return: float | None,
         eval_mean_episode_return: float | None,
-    ) -> Path | None:
-        if self.config.policy_dir is None:
-            return None
-
+    ) -> Path:
         self.config.policy_dir.mkdir(parents=True, exist_ok=True)
         policy_path = self.config.policy_dir / name
         temporary_path = policy_path.with_suffix(".pt.tmp")
@@ -194,7 +212,6 @@ class Trainer:
         episode_returns: list[float] = []
         episode_lengths: list[int] = []
 
-        self.policy_network.eval()
         with torch.inference_mode():
             for episode in range(self.config.eval_episodes):
                 state, _ = self.eval_env.reset(seed=self.config.seed + episode)
@@ -212,8 +229,6 @@ class Trainer:
 
                 episode_returns.append(episode_return)
                 episode_lengths.append(episode_length)
-
-        self.policy_network.train()
 
         return EvaluationMetrics(
             mean_episode_return=fmean(episode_returns),
@@ -233,7 +248,7 @@ class Trainer:
         diff = (self.config.epsilon_start - self.config.epsilon_end) / self.config.epsilon_decay_steps
         return self.config.epsilon_start - step * diff
 
-    def _train_step(self, batch_transitions: Transitions) -> OptimizationMetrics:
+    def _gradient_update(self, batch_transitions: Transitions) -> GradientUpdateMetrics:
         states, actions, rewards, next_states, dones = batch_transitions
 
         # Transferring uint8 to GPU is 4x faster than floats
@@ -248,17 +263,21 @@ class Trainer:
             max_q_values, _ = self.target_network(next_states).max(dim=1)
             target_q_values = rewards + self.config.gamma * (~dones).float() * max_q_values
 
-        loss = self.loss_fn(predicted_q_values, target_q_values)
-        abs_td_error = (target_q_values - predicted_q_values).abs()
+            # Store for debugging only
+            abs_td_error = (target_q_values - predicted_q_values).abs()
 
+        loss = self.loss_fn(predicted_q_values, target_q_values)
         self.optimizer.zero_grad()
         loss.backward()
+
+        # Store for debugging only. Clip gradient if needed.
         gradient_norm = torch.nn.utils.get_total_norm(
             parameter.grad for parameter in self.policy_network.parameters() if parameter.grad is not None
         )
+
         self.optimizer.step()
 
-        return OptimizationMetrics(
+        return GradientUpdateMetrics(
             loss=loss.detach().cpu().item(),
             gradient_norm=gradient_norm.detach().cpu().item(),
             predicted_q=predicted_q_values.detach().mean().cpu().item(),
@@ -301,15 +320,15 @@ class Trainer:
             else:
                 state = next_state
 
-            if len(self.replay_buffer) >= self.config.replay_warmup_steps and step % self.config.train_frequency_steps == 0:
+            if len(self.replay_buffer) >= self.config.replay_warmup_steps and step % self.config.gradient_update_interval_steps == 0:
                 batch_transitions = self.replay_buffer.sample(self.config.batch_size)
-                optimization_metrics = self._train_step(batch_transitions)
-                self.metrics.record_optimization(optimization_metrics)
+                gradient_update_metrics = self._gradient_update(batch_transitions)
+                self.metrics.record_gradient_update(gradient_update_metrics)
 
-            if step % self.config.target_sync_interval_steps == 0:
+            if step % self.config.target_network_sync_interval_steps == 0:
                 self.target_network.sync(self.policy_network)
 
-            if step % self.config.log_interval_steps == 0:
+            if step % self.config.train_log_interval_steps == 0 or step == self.config.total_steps:
                 metrics = self.metrics.training_snapshot(epsilon=epsilon, replay_buffer_size=len(self.replay_buffer))
                 self.logger.log_train(step=step, metrics=metrics)
 
