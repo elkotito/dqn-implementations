@@ -6,6 +6,7 @@ from statistics import fmean
 from typing import Literal, Self, cast
 
 import gymnasium as gym
+import numpy as np
 import torch
 import torch.nn as nn
 from pydantic import Field, model_validator
@@ -73,10 +74,11 @@ class TrainerConfig(BaseSettings):
     eval_interval_steps: int = Field(default=250_000, gt=0)
     eval_episodes: int = Field(default=10, gt=0)
 
-    # Logging
+    # WandB
     wandb_project: str = Field(default="pong", min_length=1)
     wandb_mode: Literal["online", "offline", "disabled"] = "online"
 
+    # Logging
     log_interval_steps: int = Field(default=10_000, gt=0)
     episode_window_size: int = Field(default=100, gt=0)
     loss_window_size: int = Field(default=100, gt=0)
@@ -135,12 +137,14 @@ class Trainer:
     def __init__(self, config: TrainerConfig) -> None:
         self.config = config
         self.device = torch.device(config.device)
+
+        np.random.seed(config.seed)
+        random.seed(config.seed)
+        torch.manual_seed(config.seed)
+
         self.env = make_atari_env(config.env_id)
         self.eval_env = make_atari_env(config.env_id)
         action_space = cast(gym.spaces.Discrete, self.env.action_space)
-
-        random.seed(config.seed)
-        torch.manual_seed(config.seed)
 
         self.policy_network = DQN(int(action_space.n), config.device)
         self.target_network = self.policy_network.build_target_network()
@@ -193,22 +197,26 @@ class Trainer:
         episode_returns: list[float] = []
         episode_lengths: list[int] = []
 
-        for _ in range(self.config.eval_episodes):
-            state, _ = self.eval_env.reset()
-            episode_return = 0.0
-            episode_length = 0
-            done = False
+        self.policy_network.eval()
+        with torch.inference_mode():
+            for episode in range(self.config.eval_episodes):
+                state, _ = self.eval_env.reset(seed=self.config.seed + episode)
+                episode_return = 0.0
+                episode_length = 0
+                done = False
 
-            while not done:
-                batch_state = state.unsqueeze(0).to(self.device).float().div_(255.0)
-                action = self.policy_network.greedy_actions(batch_state).squeeze(0).cpu()
-                state, reward, terminated, truncated, _ = self.eval_env.step(action)
-                episode_return += float(reward)
-                episode_length += 1
-                done = terminated or truncated
+                while not done:
+                    batch_state = state.unsqueeze(0).to(self.device).float().div_(255.0)
+                    action = self.policy_network.greedy_actions(batch_state).squeeze(0).cpu()
+                    state, reward, terminated, truncated, _ = self.eval_env.step(action)
+                    episode_return += float(reward)
+                    episode_length += 1
+                    done = terminated or truncated
 
-            episode_returns.append(episode_return)
-            episode_lengths.append(episode_length)
+                episode_returns.append(episode_return)
+                episode_lengths.append(episode_length)
+
+        self.policy_network.train()
 
         return EvaluationMetrics(
             mean_episode_return=fmean(episode_returns),
