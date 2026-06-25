@@ -3,8 +3,8 @@ env_id: ALE/Pong-v5
 # Training
 total_steps: 10_000_000
 gradient_update_interval_steps: 4 # In total 2.5M gradient updates
-learning_rate: 0.00001
-adam_epsilon: 0.0001
+learning_rate: 0.0000625
+adam_epsilon: 0.00015
 batch_size: 32
 
 # Replay buffer
@@ -17,7 +17,7 @@ epsilon_end: 0.01
 epsilon_decay_steps: 1_000_000
 
 # Target network
-target_network_sync_interval_steps: 40_000 # Every 10k gradient updates
+target_network_sync_interval_steps: 10_000 # Every 2.5k gradient updates
 
 # TD
 reward_clip: 1.0
