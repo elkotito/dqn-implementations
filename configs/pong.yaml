@@ -5,6 +5,7 @@ total_steps: 10_000_000
 gradient_update_interval_steps: 4 # In total 2.5M gradient updates
 learning_rate: 0.0000625
 adam_epsilon: 0.00015
+max_grad_norm: 10.0
 batch_size: 32
 
 # Replay buffer
@@ -36,5 +37,5 @@ eval_episodes: 16
 wandb_project: pong
 wandb_mode: online
 train_log_interval_steps: 10_000 # Every 2.5k gradient updates
-episode_window_size: 100
-gradient_update_window_size: 100
+episode_window: 100
+gradient_window: 100

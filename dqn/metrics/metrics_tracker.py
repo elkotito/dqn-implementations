@@ -45,9 +45,9 @@ class EvaluationMetrics:
 
 
 class MetricsTracker:
-    def __init__(self, *, episode_window_size: int, gradient_update_window_size: int) -> None:
-        self._episodes = deque[EpisodeMetrics](maxlen=episode_window_size)
-        self._gradient_updates = deque[GradientUpdateMetrics](maxlen=gradient_update_window_size)
+    def __init__(self, *, episode_window: int, gradient_window: int) -> None:
+        self._episodes = deque[EpisodeMetrics](maxlen=episode_window)
+        self._gradient_updates = deque[GradientUpdateMetrics](maxlen=gradient_window)
         self._latest_evaluation: EvaluationMetrics | None = None
         self._best_evaluation: EvaluationMetrics | None = None
 

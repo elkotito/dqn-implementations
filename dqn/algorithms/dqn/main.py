@@ -1,9 +1,10 @@
-from dqn.training.trainer import Trainer, TrainerConfig
+from dqn.algorithms.dqn.config import DQNConfig
+from dqn.algorithms.dqn.trainer import DQNTrainer
 
 
 def main() -> None:
-    config = TrainerConfig()
-    trainer = Trainer(config)
+    config = DQNConfig()
+    trainer = DQNTrainer(config)
     trainer.train()
 
 
