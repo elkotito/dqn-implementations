@@ -162,10 +162,9 @@ class Trainer:
 
         self.policy_network = DQN(int(action_space.n), config.device)
         self.target_network = self.policy_network.build_target_network()
-
         self.replay_buffer = ReplayBuffer(config.replay_capacity)
-        # A larger epsilon limits Adam updates when the second-moment estimate is very small,
-        # reducing abrupt Q-value changes that can destabilize DQN training.
+
+        # A larger epsilon limits Adam updates when the second-moment estimate is very small, reducing abrupt Q-value changes that can destabilize DQN training.
         self.optimizer = torch.optim.Adam(self.policy_network.parameters(), lr=config.learning_rate, eps=config.adam_epsilon)
         self.loss_fn = nn.SmoothL1Loss()
 
