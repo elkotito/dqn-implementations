@@ -11,6 +11,7 @@
     "undones",
     "customise",
     "dotenv",
-    "wandb"
+    "wandb",
+    "idxs"
   ]
 }

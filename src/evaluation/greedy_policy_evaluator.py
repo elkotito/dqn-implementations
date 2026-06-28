@@ -4,8 +4,8 @@ from typing import Protocol
 import torch
 from torch import Tensor
 
-from dqn.envs.atari import AtariEnv
-from dqn.metrics.metrics_tracker import EvaluationMetrics
+from src.envs.atari import AtariEnv
+from src.metrics.metrics_tracker import EvaluationMetrics
 
 
 class GreedyPolicy(Protocol):

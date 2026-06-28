@@ -6,15 +6,15 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from dqn.algorithms.prioritized_dqn.config import PrioritizedDQNConfig
-from dqn.buffers.prioritized_replay_buffer import PrioritizedReplayBuffer, Transition, Transitions
-from dqn.checkpoints.policy_checkpoint_store import PolicyCheckpointStore
-from dqn.envs.atari import make_atari_env
-from dqn.evaluation.greedy_policy_evaluator import GreedyPolicyEvaluator
-from dqn.loggers.wandb import WandbLogger
-from dqn.metrics.metrics_tracker import EpisodeMetrics, GradientUpdateMetrics, MetricsTracker
-from dqn.network.dqn import DQN
-from dqn.schedules.linear_scheduler import LinearScheduler
+from src.algorithms.prioritized_dqn.config import PrioritizedDQNConfig
+from src.buffers.prioritized_replay_buffer import PrioritizedReplayBuffer, Transition, Transitions
+from src.checkpoints.policy_checkpoint_store import PolicyCheckpointStore
+from src.envs.atari import make_atari_env
+from src.evaluation.greedy_policy_evaluator import GreedyPolicyEvaluator
+from src.loggers.wandb import WandbLogger
+from src.metrics.metrics_tracker import EpisodeMetrics, GradientUpdateMetrics, MetricsTracker
+from src.network.dqn import DQN
+from src.schedules.linear_scheduler import LinearScheduler
 
 
 class PrioritizedDQNTrainer:

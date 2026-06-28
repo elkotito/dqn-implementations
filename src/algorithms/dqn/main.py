@@ -1,5 +1,5 @@
-from dqn.algorithms.dqn.config import DQNConfig
-from dqn.algorithms.dqn.trainer import DQNTrainer
+from src.algorithms.dqn.config import DQNConfig
+from src.algorithms.dqn.trainer import DQNTrainer
 
 
 def main() -> None:

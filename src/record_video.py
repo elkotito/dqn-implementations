@@ -6,9 +6,9 @@ import torch
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from dqn.envs.atari import make_atari_env
-from dqn.evaluation.greedy_policy_evaluator import GreedyPolicyEvaluator
-from dqn.network.dqn import DQN
+from src.envs.atari import make_atari_env
+from src.evaluation.greedy_policy_evaluator import GreedyPolicyEvaluator
+from src.network.dqn import DQN
 
 
 class RecordVideoConfig(BaseSettings):

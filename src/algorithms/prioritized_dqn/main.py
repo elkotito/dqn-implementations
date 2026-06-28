@@ -1,5 +1,5 @@
-from dqn.algorithms.prioritized_dqn.config import PrioritizedDQNConfig
-from dqn.algorithms.prioritized_dqn.trainer import PrioritizedDQNTrainer
+from src.algorithms.prioritized_dqn.config import PrioritizedDQNConfig
+from src.algorithms.prioritized_dqn.trainer import PrioritizedDQNTrainer
 
 
 def main() -> None:

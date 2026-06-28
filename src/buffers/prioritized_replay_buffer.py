@@ -4,7 +4,7 @@ from typing import TypedDict
 import torch
 from torch import Tensor
 
-from dqn.buffers.replay_buffer import Transition
+from src.buffers.replay_buffer import Transition
 
 
 class Transitions(TypedDict):
