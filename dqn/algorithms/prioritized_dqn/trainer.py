@@ -6,8 +6,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from dqn.algorithms.dqn.config import DQNConfig
-from dqn.buffers.replay_buffer import NaiveReplayBuffer, Transition, Transitions
+from dqn.algorithms.prioritized_dqn.config import PrioritizedDQNConfig
+from dqn.buffers.prioritized_replay_buffer import PrioritizedReplayBuffer, Transition, Transitions
 from dqn.checkpoints.policy_checkpoint_store import PolicyCheckpointStore
 from dqn.envs.atari import make_atari_env
 from dqn.evaluation.greedy_policy_evaluator import GreedyPolicyEvaluator
@@ -17,7 +17,7 @@ from dqn.network.dqn import DQN
 from dqn.schedules.linear_scheduler import LinearScheduler
 
 
-class DQNTrainer:
+class PrioritizedDQNTrainer:
     """
     Trains a DQN agent using the given configuration.
 
@@ -25,7 +25,7 @@ class DQNTrainer:
     such as evaluation, checkpointing, and epsilon scheduling live outside of it.
     """
 
-    def __init__(self, config: DQNConfig) -> None:
+    def __init__(self, config: PrioritizedDQNConfig) -> None:
         self.config = config
         self.device = torch.device(config.device)
 
@@ -37,7 +37,14 @@ class DQNTrainer:
         self.eval_env = make_atari_env(config.env_id)
         action_space = cast(gym.spaces.Discrete, self.env.action_space)
 
-        self.replay_buffer = NaiveReplayBuffer(config.replay_capacity)
+        self.replay_buffer = PrioritizedReplayBuffer(config.replay_capacity, config.replay_alpha)
+        self.beta_scheduler = LinearScheduler(
+            warmup_steps=config.replay_warmup_steps,
+            start=config.replay_beta_start,
+            end=config.replay_beta_end,
+            num_steps=config.replay_beta_anneal_steps,
+        )
+
         self.policy_network = DQN(int(action_space.n), config.device)
         self.target_network = self.policy_network.build_target_network()
         self.epsilon_scheduler = LinearScheduler(
@@ -49,7 +56,7 @@ class DQNTrainer:
 
         # A larger epsilon limits Adam updates when the second-moment estimate is very small, reducing abrupt Q-value changes that can destabilize DQN training.
         self.optimizer = torch.optim.Adam(self.policy_network.parameters(), lr=config.learning_rate, eps=config.adam_epsilon)
-        self.loss_fn = nn.SmoothL1Loss()
+        self.loss_fn = nn.SmoothL1Loss(reduction="none")  # We will use weights from Prioritized Replay Buffer
 
         self.evaluator = GreedyPolicyEvaluator(episodes=config.eval_episodes, seed=config.seed, device=self.device)
         self.checkpoints = PolicyCheckpointStore(policy_dir=config.policy_dir, env_id=config.env_id)
@@ -57,26 +64,29 @@ class DQNTrainer:
         self.logger = WandbLogger(project=config.wandb_project, config=config.model_dump(mode="json"), mode=config.wandb_mode)
 
     def _gradient_update(self, transitions: Transitions) -> GradientUpdateMetrics:
-        states, actions, rewards, next_states, dones = transitions
-
-        # Transferring uint8 to GPU is 4x faster than floats
-        states = states.to(self.device).float().div_(255.0)
-        next_states = next_states.to(self.device).float().div_(255.0)
-        actions = actions.to(self.device)
-        rewards = rewards.to(self.device)
-        dones = dones.to(self.device)
+        states = transitions["states"].to(self.device).float().div_(255.0)
+        next_states = transitions["next_states"].to(self.device).float().div_(255.0)
+        actions = transitions["actions"].to(self.device)
+        rewards = transitions["rewards"].to(self.device)
+        dones = transitions["dones"].to(self.device)
+        tree_idxs = transitions["tree_idxs"]
+        weights = transitions["weights"].to(self.device)
 
         predicted_q_values = self.policy_network(states).gather(index=actions[:, None], dim=1).squeeze(1)
         with torch.no_grad():
             max_q_values, _ = self.target_network(next_states).max(dim=1)
             target_q_values = rewards + self.config.gamma * (~dones).float() * max_q_values
-            abs_td_error = (target_q_values - predicted_q_values).abs()  # Debugging only
+            abs_td_error = (target_q_values - predicted_q_values).abs()
 
-        loss = self.loss_fn(predicted_q_values, target_q_values)
+        losses = self.loss_fn(predicted_q_values, target_q_values)
+        loss = (weights * losses).mean()
+
         self.optimizer.zero_grad()
         loss.backward()
         gradient_norm = torch.nn.utils.clip_grad_norm_(self.policy_network.parameters(), max_norm=self.config.max_grad_norm)
         self.optimizer.step()
+
+        self.replay_buffer.update_priorities(tree_idxs, abs_td_error)
 
         return GradientUpdateMetrics(
             loss=loss.detach().cpu().item(),
@@ -122,7 +132,8 @@ class DQNTrainer:
                 state = next_state
 
             if len(self.replay_buffer) >= self.config.replay_warmup_steps and step % self.config.gradient_update_interval_steps == 0:
-                batch_transitions = self.replay_buffer.sample(self.config.batch_size)
+                beta = self.beta_scheduler(step)
+                batch_transitions = self.replay_buffer.sample(self.config.batch_size, beta=beta)
                 gradient_update_metrics = self._gradient_update(batch_transitions)
                 self.metrics.record_gradient_update(gradient_update_metrics)
 

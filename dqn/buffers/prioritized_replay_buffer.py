@@ -1,5 +1,5 @@
 import random
-from typing import Dict, TypedDict
+from typing import TypedDict
 
 import torch
 from torch import Tensor
@@ -7,13 +7,14 @@ from torch import Tensor
 from dqn.buffers.replay_buffer import Transition
 
 
-class PrioritizedTransitions(TypedDict):
+class Transitions(TypedDict):
     states: Tensor
     actions: Tensor
     rewards: Tensor
     next_states: Tensor
     dones: Tensor
     tree_idxs: Tensor
+    weights: Tensor
 
 
 class SumTree:
@@ -68,12 +69,12 @@ class SumTree:
 class PrioritizedReplayBuffer:
     """Store raw CPU uint8 observations and return unnormalized CPU batches."""
 
-    def __init__(self, max_size: int, alpha: float = 0.6, epsilon: float = 1e-6, beta: float = 0.4) -> None:
+    def __init__(self, max_size: int, alpha: float = 0.6) -> None:
         self.sum_tree = SumTree(max_size)
 
+        self.epsilon = 1e-6
         self.alpha = alpha
-        self.epsilon = epsilon
-        self.beta = beta
+        self.max_priority = 1.0
         self.max_size = max_size
         self.curr_size = 0
         self.curr_buffer_idx = 0
@@ -93,23 +94,25 @@ class PrioritizedReplayBuffer:
         self.next_states[self.curr_buffer_idx] = next_state
         self.dones[self.curr_buffer_idx] = done
 
-        priority = (abs(reward) + self.epsilon) ** self.alpha
-        self.sum_tree.add(priority)
+        self.sum_tree.add(self.max_priority)
         self.curr_buffer_idx = (self.curr_buffer_idx + 1) % self.max_size
         self.curr_size = min(self.curr_size + 1, self.max_size)
 
-    def sample(self, batch_size: int) -> PrioritizedTransitions:
-        segment = self.sum_tree.total() / batch_size
-        data_idxs = []
-        tree_idxs = []
+    def sample(self, batch_size: int, *, beta: float) -> Transitions:
+        total_priority = self.sum_tree.total()
+        segment = total_priority / batch_size
+        data_idxs: list[int] = []
+        tree_idxs: list[int] = []
+        sampling_probabilities: list[float] = []
 
         for i in range(batch_size):
             low = segment * i
             high = segment * (i + 1)
             value = random.uniform(low, high)
-            tree_idx, data_idx, _ = self.sum_tree.get(value)
+            tree_idx, data_idx, priority = self.sum_tree.get(value)
             data_idxs.append(data_idx)
             tree_idxs.append(tree_idx)
+            sampling_probabilities.append(priority / total_priority)
 
         states, actions, rewards, next_states, dones = [], [], [], [], []
         for idx in data_idxs:
@@ -131,6 +134,9 @@ class PrioritizedReplayBuffer:
             next_states.append(next_state)
             dones.append(done)
 
+        weights = (self.curr_size * torch.tensor(sampling_probabilities, dtype=torch.float32)).pow(-beta)
+        weights.div_(weights.max())
+
         return {
             "states": torch.stack(states),
             "actions": torch.tensor(actions, dtype=torch.int64),
@@ -138,6 +144,7 @@ class PrioritizedReplayBuffer:
             "next_states": torch.stack(next_states),
             "dones": torch.tensor(dones, dtype=torch.bool),
             "tree_idxs": torch.tensor(tree_idxs, dtype=torch.int64),
+            "weights": weights,
         }
 
     def update_priorities(self, tree_idxs: Tensor, td_errors: Tensor) -> None:
@@ -147,6 +154,7 @@ class PrioritizedReplayBuffer:
 
         for tree_idx, priority in zip(tree_idxs.tolist(), priorities.tolist(), strict=True):
             self.sum_tree.update(int(tree_idx), float(priority))
+            self.max_priority = max(self.max_priority, float(priority))
 
     def __len__(self) -> int:
         return self.curr_size
