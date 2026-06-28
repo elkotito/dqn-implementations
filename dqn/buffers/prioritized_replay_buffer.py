@@ -108,7 +108,7 @@ class PrioritizedReplayBuffer:
             high = segment * (i + 1)
             value = random.uniform(low, high)
             tree_idx, data_idx, _ = self.sum_tree.get(value)
-            # data_idxs.append(data_idx)
+            data_idxs.append(data_idx)
             tree_idxs.append(tree_idx)
 
         states, actions, rewards, next_states, dones = [], [], [], [], []
