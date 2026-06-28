@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 from dqn.algorithms.dqn.config import DQNConfig
-from dqn.buffers.replay_buffer import ReplayBuffer, Transition, Transitions
+from dqn.buffers.replay_buffer import NaiveReplayBuffer, Transition, Transitions
 from dqn.checkpoints.policy_checkpoint_store import PolicyCheckpointStore
 from dqn.envs.atari import make_atari_env
 from dqn.evaluation.greedy_policy_evaluator import GreedyPolicyEvaluator
@@ -37,7 +37,7 @@ class DQNTrainer:
         self.eval_env = make_atari_env(config.env_id)
         action_space = cast(gym.spaces.Discrete, self.env.action_space)
 
-        self.replay_buffer = ReplayBuffer(config.replay_capacity)
+        self.replay_buffer = NaiveReplayBuffer(config.replay_capacity)
         self.policy_network = DQN(int(action_space.n), config.device)
         self.target_network = self.policy_network.build_target_network()
         self.epsilon_scheduler = LinearEpsilonScheduler(
@@ -56,8 +56,8 @@ class DQNTrainer:
         self.metrics = MetricsTracker(episode_window=config.episode_window, gradient_window=config.gradient_window)
         self.logger = WandbLogger(project=config.wandb_project, config=config.model_dump(mode="json"), mode=config.wandb_mode)
 
-    def _gradient_update(self, batch_transitions: Transitions) -> GradientUpdateMetrics:
-        states, actions, rewards, next_states, dones = batch_transitions
+    def _gradient_update(self, transitions: Transitions) -> GradientUpdateMetrics:
+        states, actions, rewards, next_states, dones = transitions
 
         # Transferring uint8 to GPU is 4x faster than floats
         states = states.to(self.device).float().div_(255.0)

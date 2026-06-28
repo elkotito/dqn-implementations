@@ -2,11 +2,13 @@ env_id: ALE/Pong-v5
 
 # Training
 total_steps: 10_000_000
-gradient_update_interval_steps: 4 # In total 2.5M gradient updates
 learning_rate: 0.0000625
 adam_epsilon: 0.00015
 max_grad_norm: 10.0
 batch_size: 32
+
+gradient_update_interval_steps: 4 # In total 2.5M gradient updates
+train_log_interval_steps: 10_000 # Every 2.5k gradient updates
 
 # Replay buffer
 replay_warmup_steps: 50_000
@@ -36,6 +38,5 @@ eval_episodes: 16
 # Logging
 wandb_project: pong
 wandb_mode: online
-train_log_interval_steps: 10_000 # Every 2.5k gradient updates
 episode_window: 100
 gradient_window: 100

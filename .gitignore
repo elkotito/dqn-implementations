@@ -5,3 +5,4 @@ artifacts/
 videos/
 policies/
 scripts/
+.DS_Store
