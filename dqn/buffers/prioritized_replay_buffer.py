@@ -1,6 +1,5 @@
 import random
-from typing import NamedTuple, TypedDict
-from unittest.case import _AssertRaisesBaseContext
+from typing import Dict, TypedDict
 
 import torch
 from torch import Tensor
@@ -8,13 +7,12 @@ from torch import Tensor
 from dqn.buffers.replay_buffer import Transition
 
 
-class PrioritizedBatchedTransitions(TypedDict):
+class PrioritizedTransitions(TypedDict):
     states: Tensor
     actions: Tensor
     rewards: Tensor
     next_states: Tensor
     dones: Tensor
-    data_idxs: Tensor
     tree_idxs: Tensor
 
 
@@ -100,7 +98,7 @@ class PrioritizedReplayBuffer:
         self.curr_buffer_idx = (self.curr_buffer_idx + 1) % self.max_size
         self.curr_size = min(self.curr_size + 1, self.max_size)
 
-    def sample(self, batch_size: int) -> PrioritizedBatchedTransitions:
+    def sample(self, batch_size: int) -> PrioritizedTransitions:
         segment = self.sum_tree.total() / batch_size
         data_idxs = []
         tree_idxs = []
@@ -110,7 +108,7 @@ class PrioritizedReplayBuffer:
             high = segment * (i + 1)
             value = random.uniform(low, high)
             tree_idx, data_idx, _ = self.sum_tree.get(value)
-            data_idxs.append(data_idx)
+            # data_idxs.append(data_idx)
             tree_idxs.append(tree_idx)
 
         states, actions, rewards, next_states, dones = [], [], [], [], []
@@ -139,7 +137,6 @@ class PrioritizedReplayBuffer:
             "rewards": torch.tensor(rewards, dtype=torch.float32),
             "next_states": torch.stack(next_states),
             "dones": torch.tensor(dones, dtype=torch.bool),
-            "data_idxs": torch.tensor(data_idxs, dtype=torch.int64),
             "tree_idxs": torch.tensor(tree_idxs, dtype=torch.int64),
         }
 
