@@ -1,0 +1,42 @@
+env_id: ALE/Pong-v5
+
+# Training
+total_steps: 10_000_000
+learning_rate: 0.0000625
+adam_epsilon: 0.00015
+max_grad_norm: 10.0
+batch_size: 32
+
+gradient_update_interval_steps: 4 # In total 2.5M gradient updates
+train_log_interval_steps: 10_000 # Every 2.5k gradient updates
+
+# Replay buffer
+replay_warmup_steps: 50_000
+replay_capacity: 100_000 # Usually used more i.e. 1M and async envs
+
+# Exploration
+epsilon_start: 1.0
+epsilon_end: 0.01
+epsilon_decay_steps: 1_000_000
+
+# Target network
+target_network_sync_interval_steps: 10_000 # Every 2.5k gradient updates
+
+# TD
+reward_clip: 1.0
+gamma: 0.99
+
+# Infrastructure
+seed: 2137
+device: mps
+policy_dir: ./policies/dqn
+
+# Evaluation
+eval_interval_steps: 250_000 # Every 62.5k gradient updates
+eval_episodes: 16
+
+# Logging
+wandb_project: pong
+wandb_mode: online
+episode_window: 100
+gradient_window: 100
