@@ -29,7 +29,7 @@ gamma: 0.99
 # Infrastructure
 seed: 2137
 device: mps
-policy_dir: ./policies/dqn
+policy_dir: ./policies/dqn_dueling
 
 # Evaluation
 eval_interval_steps: 250_000 # Every 62.5k gradient updates
